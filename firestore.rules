@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isRoomHost(roomCode) {
+      return isSignedIn() && get(/databases/$(database)/documents/rooms/$(roomCode)).data.hostUid == request.auth.uid;
+    }
+
+    function isRoomGuest(roomCode) {
+      return isSignedIn() && get(/databases/$(database)/documents/rooms/$(roomCode)).data.guestUid == request.auth.uid;
+    }
+
+    function isRoomMember(roomCode) {
+      return isRoomHost(roomCode) || isRoomGuest(roomCode);
+    }
+
+    // Room root document
+    match /rooms/{roomCode} {
+      // Any authenticated user can read a room to join by room code
+      allow read: if isSignedIn();
+
+      // Only host can create the room
+      allow create: if isSignedIn() && request.resource.data.hostUid == request.auth.uid;
+
+      // Update room:
+      // 1. Host or guest joining/updating
+      // 2. Prevent modifying finished room except for rematch reset to 'placement'
+      allow update: if isSignedIn() && (
+        // Joining as guest
+        (!('guestUid' in resource.data) || resource.data.guestUid == null || resource.data.guestUid == request.auth.uid || resource.data.hostUid == request.auth.uid) &&
+        (
+          resource.data.status != 'finished' ||
+          request.resource.data.status == 'placement' ||
+          request.resource.data.winReason == 'timeout' ||
+          request.resource.data.winReason == 'opponent_cheated'
+        )
+      );
+
+      // Player subcollection
+      match /players/{playerId} {
+        // Room participants can read player status
+        allow read: if isSignedIn();
+
+        // Players can ONLY write, update, or reveal their OWN player document
+        allow create, update: if isSignedIn() && request.auth.uid == playerId;
+
+        // Allow reset on rematch
+        allow delete: if isSignedIn() && (request.auth.uid == playerId || isRoomMember(roomCode));
+      }
+
+      // Shots subcollection
+      match /shots/{shotId} {
+        // Room participants can read combat telemetry
+        allow read: if isSignedIn();
+
+        // ONLY the player whose active turn it is can add a new shot
+        allow create: if isSignedIn() &&
+          request.resource.data.by == request.auth.uid &&
+          get(/databases/$(database)/documents/rooms/$(roomCode)).data.turnUid == request.auth.uid;
+
+        // DEFENDING client resolves the shot (must NOT be the shooter)
+        allow update: if isSignedIn() && request.auth.uid != resource.data.by;
+
+        // Allow clearing shots on rematch
+        allow delete: if isSignedIn();
+      }
+    }
+  }
+}
